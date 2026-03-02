@@ -3,196 +3,172 @@ import pandas as pd
 from docx import Document
 from docx.shared import Pt
 from docx.oxml.ns import qn
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
-from tkinter import Tk, Label, Entry, Button, filedialog, messagebox, Text, END, Scrollbar
+from tkinter import Tk, Label, Entry, Button, filedialog, messagebox, Text, Scrollbar, RIGHT, Y, END, BOTH
 from docx2pdf import convert
-import pythoncom
-import sys
 
-# 关键修复：重定向标准输出，防止 docx2pdf 在无控制台环境下崩溃
-if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
+def read_excel(file_path):
+    df = pd.read_excel(file_path)
+    log_text.insert(END, f"Columns in the Excel file: {df.columns.tolist()}\n")
+    return df
 
+def find_coa_file(code, source_folder):
+    for root, _, files in os.walk(source_folder):
+        for file in files:
+            if code.lower() in file.lower() and file.startswith("COA+") and file.endswith(".docx"):
+                return os.path.join(root, file)
+    return None
 
-def copy_paragraph_format(src_para, tgt_para):
-    """Deep copy paragraph formatting for perfect alignment."""
-    tgt_para.paragraph_format.alignment = src_para.paragraph_format.alignment
-    tgt_para.paragraph_format.space_before = src_para.paragraph_format.space_before
-    tgt_para.paragraph_format.space_after = src_para.paragraph_format.space_after
-    tgt_para.paragraph_format.line_spacing = src_para.paragraph_format.line_spacing
-    tgt_para.paragraph_format.line_spacing_rule = src_para.paragraph_format.line_spacing_rule
-    tgt_para.paragraph_format.left_indent = src_para.paragraph_format.left_indent
-    tgt_para.paragraph_format.right_indent = src_para.paragraph_format.right_indent
-    tgt_para.paragraph_format.first_line_indent = src_para.paragraph_format.first_line_indent
+def set_font(paragraph, font_name, font_size, bold=False):
+    for run in paragraph.runs:
+        run.font.name = font_name
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
+        run.font.size = Pt(font_size)
+        run.font.bold = bold
 
-
-def set_run_font(run, font_name="Arial", font_size=11):
-    run.font.name = font_name
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
-    run.font.size = Pt(font_size)
-
-
-def update_docx(input_path, output_path, lot_no, manufacturing_date):
+def update_docx(input_path, output_path, product_code, product_name, lot_no, sap_code, date, re_assay_date, storage):
     try:
         doc = Document(input_path)
-        for table in doc.tables:
-            if len(table.rows) == 1 and len(table.columns) >= 2:
-                left_cell = table.cell(0, 0)
-                right_cell = table.cell(0, 1)
-                left_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-                right_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        
+        # Update first page
+        for paragraph in doc.paragraphs:
+            if "Lot No. :" in paragraph.text:
+                paragraph.text = f"Lot No. : {lot_no}"
+                set_font(paragraph, font_name="Arial", font_size=11)
+                break
+        
+        # Update second page
+        for paragraph in doc.paragraphs:
+            if "The following is a statement for material:" in paragraph.text:
+                paragraph.text = f"The following is a statement for material: {product_name}"
+                set_font(paragraph, font_name="Calibri", font_size=12, bold=True)
+            elif "Product code:" in paragraph.text:
+                paragraph.text = f"Product code: {product_code} ({sap_code})"
+                set_font(paragraph, font_name="Calibri", font_size=12, bold=True)
+            elif "Lot#" in paragraph.text:
+                paragraph.text = f"Lot# {lot_no}"
+                set_font(paragraph, font_name="Calibri", font_size=12, bold=True)
+                ############################ 
+            elif "Re-Assay Date:" in paragraph.text and pd.notna(re_assay_date):
+                paragraph.text = f"Re-Assay Date: {str(re_assay_date)}"
+                set_font(paragraph, font_name="Calibri", font_size=12)
 
-                reassay_idx = -1
-                for i, p in enumerate(left_cell.paragraphs):
-                    if "re-assay" in p.text.lower() or "reassay" in p.text.lower():
-                        reassay_idx = i
-                        break
-                if reassay_idx != -1:
-                    p_to_del = left_cell.paragraphs[reassay_idx]
-                    p_to_del._element.getparent().remove(p_to_del._element)
+            elif "Storage:" in paragraph.text and pd.notna(storage):
+                paragraph.text = f"Storage: {str(storage)}"
+                set_font(paragraph, font_name="Calibri", font_size=12)
 
-                original_text = right_cell.text.replace('\r', '\n')
-                lines = [line.strip() for line in original_text.split('\n') if line.strip()]
-                target_data = ["", "", "", str(lot_no)]
-                if len(lines) > 0: target_data[0] = lines[0]
-                if len(lines) > 1: target_data[1] = lines[1]
-                if len(lines) > 2: target_data[2] = lines[2]
+            elif "Date:" in paragraph.text and pd.notna(date):
+                paragraph.text = f"Date: {str(date)}"
+                set_font(paragraph, font_name="Calibri", font_size=12)
 
-                formats = [p for p in left_cell.paragraphs]
-                right_cell.text = ""
-                for i in range(len(formats)):
-                    new_p = right_cell.paragraphs[0] if i == 0 else right_cell.add_paragraph()
-                    copy_paragraph_format(formats[i], new_p)
-                    val = target_data[i] if i < len(target_data) else ""
-                    run = new_p.add_run(val)
-                    set_run_font(run)
-
-        try:
-            dtn = pd.to_datetime(manufacturing_date)
-            formatted_date = dtn.strftime("%b %d, %Y")
-        except:
-            formatted_date = str(manufacturing_date)
-
-        for p in doc.paragraphs:
-            if "date:" in p.text.lower() and "re-assay" not in p.text.lower():
-                p.text = f"Date: {formatted_date}"
-                for run in p.runs:
-                    set_run_font(run, font_size=10.5)
-
+        
         doc.save(output_path)
         return True
     except Exception as e:
-        return f"Error: {str(e)}"
-
+        log_text.insert(END, f"Error updating Word document {input_path}: {str(e)}\n", 'error')
+        return False
 
 def process_files():
-    e_path = excel_entry.get()
-    s_folder = src_entry.get()
-    d_folder = dst_entry.get()
+    excel_path = excel_path_entry.get()
+    source_folder = source_folder_entry.get()
+    destination_folder = destination_folder_entry.get()
 
-    if not all([e_path, s_folder, d_folder]):
-        messagebox.showwarning("Warning", "Please select all required paths.")
+    if not excel_path or not source_folder or not destination_folder:
+        messagebox.showerror("Error", "All fields must be filled!")
         return
 
-    log_text.delete(1.0, END)
-    log_text.insert(END, ">>> Starting Process...\n")
-    root.update()
-
     try:
-        # 强制初始化 COM
-        pythoncom.CoInitialize()
+        df = read_excel(excel_path)
+        log_text.insert(END, f"Columns in the Excel file: {df.columns.tolist()}\n")
 
-        df = pd.read_excel(e_path)
-        total_rows = len(df)
-        success_count = 0
+        # Define the expected columns
+        expected_columns = ['Product Code', 'Description', 'Batch', 'Material', 'Date', 'Re-Assay Date', 'Storage']
+
+        # Check if all required columns exist
+        missing_columns = [col for col in expected_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing columns in Excel file: {', '.join(missing_columns)}")
 
         for index, row in df.iterrows():
-            p_code = str(row["Product Code"]).strip()
-            l_no = str(row["Lot / Batch"]).strip()
-            m_date = row["Manufacturing Date"]
+            try:
+                code = str(row['Product Code'])
+                description = str(row['Description'])
+                lot_no = str(row['Batch'])
+                sap_code = str(row['Material'])
+  
+                date = row['Date']
+                re_assay_date = row['Re-Assay Date']
+                storage = row['Storage']
 
-            log_text.insert(END, f"[{index + 1}/{total_rows}] {p_code}: ")
-            log_text.see(END)
-            root.update()
+                print('DEBUG', date, re_assay_date, storage)
 
-            template = None
-            for root_dir, _, files in os.walk(s_folder):
-                for f in files:
-                    if p_code.lower() in f.lower() and f.endswith(".docx"):
-                        template = os.path.join(root_dir, f)
-                        break
+                log_text.insert(END, f"Processing: Code={code}, Description={description}, Lot={lot_no}, SAP Code={sap_code}\n")
 
-            if not template:
-                log_text.insert(END, "Template Missing\n")
-                continue
+                coa_file = find_coa_file(code, source_folder)
+                if coa_file:
+                    new_file_name = f"COA+{code} ({sap_code})+{lot_no}.docx"
+                    output_path = os.path.join(destination_folder, new_file_name)
+                    
+                    if update_docx(coa_file, output_path, code, description, lot_no, sap_code, date, re_assay_date, storage):
+                        pdf_output_path = output_path.replace(".docx", ".pdf")
+                        convert(output_path, pdf_output_path)
+                        log_text.insert(END, f"Updated and converted COA for {code}\n")
+                    else:
+                        log_text.insert(END, f"Failed to update COA for {code}\n", 'error')
+                else:
+                    log_text.insert(END, f"COA file not found for {code}\n", 'error')
+            except Exception as e:
+                log_text.insert(END, f"Error processing row {index}: {row.to_dict()}\n", 'error')
+                log_text.insert(END, f"Error details: {str(e)}\n", 'error')
+                log_text.insert(END, f"Failed to generate COA for product code: {code}\n", 'error')
 
-            new_name = f"{p_code}-{l_no.replace('/', '-')}-C6.docx"
-            out_path = os.path.join(d_folder, new_name)
-
-            result = update_docx(template, out_path, l_no, m_date)
-            if result is True:
-                try:
-                    # 调用转换
-                    convert(out_path, out_path.replace(".docx", ".pdf"))
-                    log_text.insert(END, "SUCCESS (DOCX+PDF)\n")
-                except Exception as pdf_err:
-                    log_text.insert(END, f"DOCX ONLY (PDF Failed: {str(pdf_err)})\n")
-                success_count += 1
-            else:
-                log_text.insert(END, f"FAILED ({result})\n")
-            root.update()
-
-        log_text.insert(END,
-                        f"\n{'=' * 40}\nAll Tasks Completed!\nSuccessfully Generated: {success_count} files\n{'=' * 40}\n")
-        log_text.see(END)
-        messagebox.showinfo("Done", "Process Completed Successfully!")
-
+        messagebox.showinfo("Success", "Processing completed.")
     except Exception as e:
-        messagebox.showerror("Error", f"Fatal error: {str(e)}")
-    finally:
-        pythoncom.CoUninitialize()
+        messagebox.showerror("Error", f"An error occurred: {str(e)}")
+        log_text.insert(END, f"Critical error: {str(e)}\n", 'error')
+        
+def browse_file(entry):
+    file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+    entry.delete(0, 'end')
+    entry.insert(0, file_path)
 
+def browse_folder(entry):
+    folder_path = filedialog.askdirectory()
+    entry.delete(0, 'end')
+    entry.insert(0, folder_path)
 
-# UI Setup
+# GUI setup
 root = Tk()
-root.title("COA Auto-Generator Pro V15")
-root.geometry("850x600")  # 宽度增加到 850
-root.resizable(False, False)
+root.title("COA Updater")
 
-# Labels & Entries - 优化间距，防止文字遮挡
-label_x = 20
-entry_x = 220  # 将输入框起始点进一步后移
-entry_width = 55
+# Excel file selection
+Label(root, text="Excel File Path:").grid(row=0, column=0, padx=10, pady=5)
+excel_path_entry = Entry(root, width=50)
+excel_path_entry.grid(row=0, column=1, padx=10, pady=5)
+Button(root, text="Browse...", command=lambda: browse_file(excel_path_entry)).grid(row=0, column=2, padx=10, pady=5)
 
-Label(root, text="Excel Data File:", font=("Arial", 10, "bold")).place(x=label_x, y=20)
-excel_entry = Entry(root, width=entry_width, font=("Arial", 10))
-excel_entry.place(x=entry_x, y=20)
-Button(root, text="Browse", width=10, command=lambda: excel_entry.insert(0, filedialog.askopenfilename())).place(x=730,
-                                                                                                                 y=17)
+# Source folder selection
+Label(root, text="Source Folder Path:").grid(row=1, column=0, padx=10, pady=5)
+source_folder_entry = Entry(root, width=50)
+source_folder_entry.grid(row=1, column=1, padx=10, pady=5)
+Button(root, text="Browse...", command=lambda: browse_folder(source_folder_entry)).grid(row=1, column=2, padx=10, pady=5)
 
-Label(root, text="Source Folder Path:", font=("Arial", 10, "bold")).place(x=label_x, y=65)
-src_entry = Entry(root, width=entry_width, font=("Arial", 10))
-src_entry.place(x=entry_x, y=65)
-Button(root, text="Browse", width=10, command=lambda: src_entry.insert(0, filedialog.askdirectory())).place(x=730, y=62)
+# Destination folder selection
+Label(root, text="Destination Folder Path:").grid(row=2, column=0, padx=10, pady=5)
+destination_folder_entry = Entry(root, width=50)
+destination_folder_entry.grid(row=2, column=1, padx=10, pady=5)
+Button(root, text="Browse...", command=lambda: browse_folder(destination_folder_entry)).grid(row=2, column=2, padx=10, pady=5)
 
-Label(root, text="Destination Folder Path:", font=("Arial", 10, "bold")).place(x=label_x, y=110)
-dst_entry = Entry(root, width=entry_width, font=("Arial", 10))
-dst_entry.place(x=entry_x, y=110)
-Button(root, text="Browse", width=10, command=lambda: dst_entry.insert(0, filedialog.askdirectory())).place(x=730,
-                                                                                                            y=107)
-
-# Log Area
-log_frame = Label(root)
-log_frame.place(x=20, y=160)
-log_text = Text(log_frame, height=21, width=113, font=("Consolas", 9), bg="#F5F5F5")
-log_text.pack(side="left", fill="both")
-scrollbar = Scrollbar(log_frame, command=log_text.yview)
-scrollbar.pack(side="right", fill="y")
+# Log window
+log_text = Text(root, height=15, width=80)
+log_text.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
+scrollbar = Scrollbar(root, command=log_text.yview)
 log_text.config(yscrollcommand=scrollbar.set)
+scrollbar.grid(row=3, column=3, sticky='nsew')
 
-Button(root, text="Process Files", command=process_files, bg="#1B5E20", fg="white", font=("Arial", 12, "bold"),
-       width=30, height=2).place(x=280, y=515)
+# Create a tag to style error messages in red
+log_text.tag_config('error', foreground='red')
+
+# Process button
+Button(root, text="Process Files", command=process_files, width=20).grid(row=4, column=1, pady=20)
 
 root.mainloop()
