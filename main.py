@@ -3,195 +3,297 @@ import pandas as pd
 from docx import Document
 from docx.shared import Pt
 from docx.oxml.ns import qn
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from tkinter import Tk, Label, Entry, Button, filedialog, messagebox, Text, Scrollbar, RIGHT, Y, END, BOTH
+from docx.oxml import OxmlElement
+from docx.enum.text import WD_LINE_SPACING
+from tkinter import Tk, Label, Entry, Button, filedialog, messagebox, Text, END
 from docx2pdf import convert
-from docx.shared import Pt
 import moment
 
 
 def read_excel(file_path):
     df = pd.read_excel(file_path)
-    log_text.insert(END, f"Columns in the Excel file: {df.columns.tolist()}\n")
+    df.columns = [str(col).strip() for col in df.columns]
+    log_text.insert(END, f"Excel columns: {df.columns.tolist()}\n")
     return df
 
 
-def find_coa_file(code, source_folder):
-    # code = Product Code
+def find_coa_template(product_code, source_folder):
     for root, _, files in os.walk(source_folder):
         for file in files:
-            if code.lower() in file.lower() and file.endswith(".docx"):
+            if str(product_code).lower() in file.lower() and file.endswith(".docx"):
                 return os.path.join(root, file)
     return None
 
 
-def set_font(paragraph, font_name, font_size, bold=False):
-    for run in paragraph.runs:
-        run.font.name = font_name
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
-        run.font.size = Pt(font_size)
-        run.font.bold = bold
+def write_cell_paragraph(para, text):
+    """
+    清除段落内所有多余的run，只保留第一个。
+    移除旧 <w:t> 并插入新 <w:t>（避免自闭合节点赋值不生效的问题）。
+    """
+    p_el = para._p
+    all_runs = p_el.findall(qn('w:r'))
+
+    if not all_runs:
+        # 没有任何run，新建完整run
+        r_el = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        rFonts = OxmlElement('w:rFonts')
+        rFonts.set(qn('w:ascii'),    'Arial')
+        rFonts.set(qn('w:hAnsi'),    'Arial')
+        rFonts.set(qn('w:eastAsia'), 'Arial')
+        rPr.append(rFonts)
+        sz = OxmlElement('w:sz');     sz.set(qn('w:val'), '22'); rPr.append(sz)
+        szCs = OxmlElement('w:szCs'); szCs.set(qn('w:val'), '22'); rPr.append(szCs)
+        r_el.append(rPr)
+        t_new = OxmlElement('w:t')
+        t_new.text = text
+        r_el.append(t_new)
+        p_el.append(r_el)
+        return
+
+    # 保留第一个run，删除其余所有run
+    first_r = all_runs[0]
+    for extra_r in all_runs[1:]:
+        p_el.remove(extra_r)
+
+    # 移除旧 <w:t>（可能是自闭合空节点），插入新 <w:t>
+    t_old = first_r.find(qn('w:t'))
+    if t_old is not None:
+        first_r.remove(t_old)
+    t_new = OxmlElement('w:t')
+    t_new.text = text
+    if text.startswith(' ') or text.endswith(' '):
+        t_new.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    first_r.append(t_new)
 
 
-# if update_docx(coa_file, output_path, product_code, product_description, lot_no, sap_code, manufacturing_date, expiry_re_assay_date_date):
-def update_docx(input_path, output_path, product_code, lot_no, date, re_assay_date):
+def add_paragraph_to_cell(cell, text):
+    """在单元格末尾新增段落（右列段落不足时使用）"""
+    import copy
+    last_p = cell.paragraphs[-1]._p
+    new_p  = OxmlElement('w:p')
+    pPr = last_p.find(qn('w:pPr'))
+    if pPr is not None:
+        new_p.append(copy.deepcopy(pPr))
+    r_el = OxmlElement('w:r')
+    rPr  = OxmlElement('w:rPr')
+    rFonts = OxmlElement('w:rFonts')
+    rFonts.set(qn('w:ascii'),    'Arial')
+    rFonts.set(qn('w:hAnsi'),    'Arial')
+    rFonts.set(qn('w:eastAsia'), 'Arial')
+    rPr.append(rFonts)
+    sz   = OxmlElement('w:sz');   sz.set(qn('w:val'), '22'); rPr.append(sz)
+    szCs = OxmlElement('w:szCs'); szCs.set(qn('w:val'), '22'); rPr.append(szCs)
+    r_el.append(rPr)
+    t_el = OxmlElement('w:t')
+    t_el.text = text
+    r_el.append(t_el)
+    new_p.append(r_el)
+    cell._tc.append(new_p)
+
+
+def write_date_paragraph(para, text):
+    """更新签名区 Date 段落，保留原有格式只改文字"""
+    p_el = para._p
+    # 找第一个有 w:t 的 run
+    for r_el in p_el.findall(qn('w:r')):
+        t_el = r_el.find(qn('w:t'))
+        if t_el is not None:
+            t_el.text = text
+            return
+    # 找不到就新建
+    r_el = OxmlElement('w:r')
+    t_el = OxmlElement('w:t')
+    t_el.text = text
+    r_el.append(t_el)
+    p_el.append(r_el)
+
+
+def update_docx_content(template_path, save_path, data_row):
     try:
-        doc = Document(input_path)
+        doc = Document(template_path)
 
-        for row_index, row in enumerate(doc.tables[0].rows):
-            for col_index, cell in enumerate(row.cells):
-                if row_index == 0 and col_index == 1:
-                    # text = cell.text + f'{lot_no}\n{str(moment.date(re_assay_date).format('YYYY-MM-DD'))}\n'
-                    # cell.text = ''
+        # ── 读取 Excel 数据 ───────────────────────────────────────
+        product_code = str(data_row.get('Product Code', ''))
+        lot_no       = str(data_row.get('Lot / Batch', ''))
+        # Product 从模板右列直接读取（Excel里没有此列）
+        doc_for_product = Document(template_path)
+        right_paras_template = doc_for_product.tables[0].rows[0].cells[1].paragraphs
+        left_paras_template  = doc_for_product.tables[0].rows[0].cells[0].paragraphs
+        product_desc = ''
+        for idx, lp in enumerate(left_paras_template):
+            if lp.text.strip() == 'Product' and idx < len(right_paras_template):
+                product_desc = right_paras_template[idx].text.strip()
+                break
+        # 布局A的模板：右列单段落，Product是第一行（\n分隔）
+        if not product_desc and len(right_paras_template) == 1:
+            product_desc = right_paras_template[0].text.split('\n')[0].strip()
+        # 布局B但Product段落包含多行（取第一行）
+        if '\n' in product_desc:
+            product_desc = product_desc.split('\n')[0].strip()
+        grade        = str(data_row.get('Grade', 'Biotech'))
+        expiry_raw   = data_row.get('Expiry Date/ Re-Assay Date')
+        mfg_raw      = data_row.get('Manufacturing Date')
 
-                    for paragraph in cell.paragraphs:
-                        p = paragraph._element
-                        p.getparent().remove(p)
+        reassay_str  = moment.date(expiry_raw).format('YYYY-MM-DD')  # 2027-02-28
+        mfg_str      = moment.date(mfg_raw).format('MMM D, YYYY')    # Aug 18, 2025
 
-                    paragraph = cell.add_paragraph()
-                    paragraph.text = text
-                    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        log_text.insert(END, f"  Lot: {lot_no} | Re-assay: {reassay_str} | Mfg: {mfg_str}\n")
 
-                    set_font(paragraph, font_name="Arial", font_size=11, bold=False)
-                    paragraph_format = paragraph.paragraph_format
-                    paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+        # ── 标签 → 值 映射 ────────────────────────────────────────
+        label_to_value = {
+            "Product":       product_desc,
+            "Grade":         grade,
+            "Product Code":  product_code,
+            "Lot No.":       lot_no,
+            "Re-assay Date": reassay_str,
+        }
 
-                elif row_index == 0 and col_index == 0:
-                    for paragraph in cell.paragraphs:
-                        paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+        # ── 处理 Table 0 ──────────────────────────────────────────
+        table       = doc.tables[0]
+        left_cell   = table.rows[0].cells[0]
+        right_cell  = table.rows[0].cells[1]
+        left_paras  = left_cell.paragraphs
+        right_paras = right_cell.paragraphs
 
-        for paragraph in doc.paragraphs:
-            # print('paragraph.text', paragraph.text)
-            # if "Lot No." in paragraph.text:
-            #     paragraph.text = f"Lot# {lot_no}"
-            #     set_font(paragraph, font_name="Calibri", font_size=12, bold=True)
-            #     ############################
-            # elif "Re-assay Date" in paragraph.text:
-            #     paragraph.text = f"Re-Assay Date: {str(re_assay_date)}"
-            #     set_font(paragraph, font_name="Arial", font_size=11)
+        # 按左列顺序收集 (label, value)
+        values_in_order = [
+            (lp.text.strip(), label_to_value[lp.text.strip()])
+            for lp in left_paras
+            if lp.text.strip() in label_to_value
+        ]
 
-            if "Date" in paragraph.text:
-                print('date', date)
-                paragraph.text = f"Date: {str(moment.date(date).format('MMM D, YYYY'))}"
+        if len(right_paras) == 1:
+            # ── 布局 A：右列单段落，值以 <w:br/> 换行拼接 ────────
+            para = right_paras[0]
+            p_el = para._p
+            for r in p_el.findall(qn('w:r')):
+                p_el.remove(r)
+            new_r  = OxmlElement('w:r')
+            rPr    = OxmlElement('w:rPr')
+            rFonts = OxmlElement('w:rFonts')
+            rFonts.set(qn('w:ascii'),    'Arial')
+            rFonts.set(qn('w:hAnsi'),    'Arial')
+            rFonts.set(qn('w:eastAsia'), 'Arial')
+            rPr.append(rFonts)
+            sz   = OxmlElement('w:sz');   sz.set(qn('w:val'), '22'); rPr.append(sz)
+            szCs = OxmlElement('w:szCs'); szCs.set(qn('w:val'), '22'); rPr.append(szCs)
+            new_r.append(rPr)
+            for label, val in values_in_order:
+                t_el = OxmlElement('w:t')
+                t_el.text = val
+                if val.startswith(' ') or val.endswith(' '):
+                    t_el.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                new_r.append(t_el)
+                new_r.append(OxmlElement('w:br'))
+            p_el.append(new_r)
 
-                set_font(paragraph, font_name="Arial", font_size=10.5)
+        else:
+            # ── 布局 B：右列多段落，按索引逐一写入 ───────────────
+            for i, left_para in enumerate(left_paras):
+                label = left_para.text.strip()
+                if label not in label_to_value:
+                    continue
+                value = label_to_value[label]
+                if i < len(right_paras):
+                    write_cell_paragraph(right_paras[i], value)
+                else:
+                    add_paragraph_to_cell(right_cell, value)
+                log_text.insert(END, f"  ✓ Layout B '{label}' → '{value}'\n")
 
-        doc.save(output_path)
+        # ── 更新签名区 Date ───────────────────────────────────────
+        for para in doc.paragraphs:
+            if "Date:" in para.text and "Re-assay" not in para.text:
+                write_date_paragraph(para, f"Date: {mfg_str}")
+                log_text.insert(END, f"  ✓ Date → 'Date: {mfg_str}'\n")
+
+        # ── 更新页脚 Date ─────────────────────────────────────────
+        for section in doc.sections:
+            for para in section.footer.paragraphs:
+                if "Date:" in para.text and "Re-assay" not in para.text:
+                    write_date_paragraph(para, f"Date: {mfg_str}")
+
+        doc.save(save_path)
         return True
+
     except Exception as e:
-        log_text.insert(END, f"Error updating Word document {input_path}: {str(e)}\n", 'error')
+        import traceback
+        log_text.insert(END, f"❌ Error: {str(e)}\n", 'error')
+        log_text.insert(END, traceback.format_exc() + "\n", 'error')
         return False
 
 
-def process_files():
-    excel_path = excel_path_entry.get()
-    source_folder = source_folder_entry.get()
-    destination_folder = destination_folder_entry.get()
+def start_processing():
+    excel_p  = excel_entry.get()
+    source_p = source_entry.get()
+    output_p = output_entry.get()
 
-    if not excel_path or not source_folder or not destination_folder:
-        messagebox.showerror("Error", "All fields must be filled!")
+    if not all([excel_p, source_p, output_p]):
+        messagebox.showwarning("Warning", "Please select all paths first.")
         return
 
     try:
-        df = read_excel(excel_path)
-        log_text.insert(END, f"Columns in the Excel file: {df.columns.tolist()}\n")
+        df = read_excel(excel_p)
+        for _, row in df.iterrows():
+            p_code  = str(row.get('Product Code', ''))
+            l_batch = str(row.get('Lot / Batch', ''))
+            if not p_code or p_code == 'nan':
+                continue
 
-        # Define the expected columns
-        expected_columns = ['Product Code', 'Lot / Batch', 'Manufacturing Date', 'Expiry Date/ Re-Assay Date']
+            log_text.insert(END, f"\n▶ {p_code} | Lot: {l_batch}\n")
+            template = find_coa_template(p_code, source_p)
 
-        # Check if all required columns exist
-        missing_columns = [col for col in expected_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Missing columns in Excel file: {', '.join(missing_columns)}")
-
-        for index, row in df.iterrows():
-            try:
-                product_code = str(row['Product Code'])
-                # sap_code = str(row['SAP/ Material ID']).strip()
-                # product_description = str(row['Product Description'])
-                lot_no = str(row['Lot / Batch'])
-                # manufacturing_date = row['Manufacturing Date']
-                # expiry_re_assay_date_date = row['Expiry Date/ Re-Assay Date']
-
-                log_text.insert(END,
-                                f"Processing: Product Code={product_code}, Lot / Batch={lot_no}, Manufacturing Date={manufacturing_date}, Expiry Date/ Re-Assay Date= \n")
-
-                coa_file = find_coa_file(product_code, source_folder)
-
-                if coa_file:
-                    new_file_name = f"{product_code}-{lot_no}-with ED-C6).docx"
-
-                    # if not os.path.exists(os.path.join(destination_folder, customer_po)):
-                    #     os.makedirs(os.path.join(destination_folder, customer_po))
-
-                    output_path = os.path.join(destination_folder, new_file_name)
-
-                    if update_docx(coa_file, output_path, product_code, lot_no):
-                        pdf_output_path = output_path.replace(".docx", ".pdf")
-                        convert(output_path, pdf_output_path)
-                        log_text.insert(END, f"Updated and converted COA for {product_code}\n")
-                    else:
-                        log_text.insert(END, f"Failed to update COA for {product_code}\n", 'error')
+            if template:
+                output_name = f"{p_code}-{l_batch}-with ED-C6.docx"
+                final_path  = os.path.join(output_p, output_name)
+                if update_docx_content(template, final_path, row):
+                    try:
+                        convert(final_path)
+                        log_text.insert(END, f"✅ {output_name}\n")
+                    except Exception as e:
+                        log_text.insert(END, f"⚠️ Word saved, PDF failed: {e}\n", 'error')
                 else:
-                    log_text.insert(END, f"COA file not found for {product_code}\n", 'error')
-            except Exception as e:
-                log_text.insert(END, f"Error processing row {index}: {row.to_dict()}\n", 'error')
-                log_text.insert(END, f"Error details: {str(e)}\n", 'error')
-                log_text.insert(END, f"Failed to generate COA for product code: {product_code}\n", 'error')
+                    log_text.insert(END, f"❌ Failed: {p_code}\n", 'error')
+            else:
+                log_text.insert(END, f"❌ Template not found: {p_code}\n", 'error')
 
-        messagebox.showinfo("Success", "Processing completed.")
+            log_text.see(END)
+            root.update()
+
+        messagebox.showinfo("Done", "All files processed.")
     except Exception as e:
-        messagebox.showerror("Error", f"An error occurred: {str(e)}")
-        log_text.insert(END, f"Critical error: {str(e)}\n", 'error')
+        import traceback
+        log_text.insert(END, f"Critical Error: {str(e)}\n", 'error')
+        log_text.insert(END, traceback.format_exc() + "\n", 'error')
 
 
-def browse_file(entry):
-    file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
-    entry.delete(0, 'end')
-    entry.insert(0, file_path)
-
-
-def browse_folder(entry):
-    folder_path = filedialog.askdirectory()
-    entry.delete(0, 'end')
-    entry.insert(0, folder_path)
-
-
-# GUI setup
+# ── GUI ───────────────────────────────────────────────────────────
 root = Tk()
-root.title("Buffer COA Generator")
+root.title("COA Auto-Generator")
 
-# Excel file selection
-Label(root, text="Excel File Path:").grid(row=0, column=0, padx=10, pady=5)
-excel_path_entry = Entry(root, width=50)
-excel_path_entry.grid(row=0, column=1, padx=10, pady=5)
-Button(root, text="Browse...", command=lambda: browse_file(excel_path_entry)).grid(row=0, column=2, padx=10, pady=5)
+Label(root, text="Excel File:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
+excel_entry = Entry(root, width=60)
+excel_entry.grid(row=0, column=1)
+Button(root, text="Browse",
+       command=lambda: excel_entry.insert(0, filedialog.askopenfilename())).grid(row=0, column=2, padx=5)
 
-# Source folder selection
-Label(root, text="Source Folder Path:").grid(row=1, column=0, padx=10, pady=5)
-source_folder_entry = Entry(root, width=50)
-source_folder_entry.grid(row=1, column=1, padx=10, pady=5)
-Button(root, text="Browse...", command=lambda: browse_folder(source_folder_entry)).grid(row=1, column=2, padx=10,
-                                                                                        pady=5)
+Label(root, text="Template Folder:").grid(row=1, column=0, padx=10, pady=5, sticky="e")
+source_entry = Entry(root, width=60)
+source_entry.grid(row=1, column=1)
+Button(root, text="Browse",
+       command=lambda: source_entry.insert(0, filedialog.askdirectory())).grid(row=1, column=2, padx=5)
 
-# Destination folder selection
-Label(root, text="Destination Folder Path:").grid(row=2, column=0, padx=10, pady=5)
-destination_folder_entry = Entry(root, width=50)
-destination_folder_entry.grid(row=2, column=1, padx=10, pady=5)
-Button(root, text="Browse...", command=lambda: browse_folder(destination_folder_entry)).grid(row=2, column=2, padx=10,
-                                                                                             pady=5)
+Label(root, text="Output Folder:").grid(row=2, column=0, padx=10, pady=5, sticky="e")
+output_entry = Entry(root, width=60)
+output_entry.grid(row=2, column=1)
+Button(root, text="Browse",
+       command=lambda: output_entry.insert(0, filedialog.askdirectory())).grid(row=2, column=2, padx=5)
 
-# Log window
-log_text = Text(root, height=15, width=80)
+log_text = Text(root, height=20, width=90)
 log_text.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
-scrollbar = Scrollbar(root, command=log_text.yview)
-log_text.config(yscrollcommand=scrollbar.set)
-scrollbar.grid(row=3, column=3, sticky='nsew')
-
-# Create a tag to style error messages in red
 log_text.tag_config('error', foreground='red')
 
-# Process button
-Button(root, text="Process Files", command=process_files, width=20).grid(row=4, column=1, pady=20)
+Button(root, text="RUN PROCESS", command=start_processing,
+       width=30, height=2, bg="#4CAF50", fg="white").grid(row=4, column=1, pady=15)
 
 root.mainloop()
