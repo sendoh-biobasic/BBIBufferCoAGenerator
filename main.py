@@ -187,6 +187,7 @@ def update_docx_content(template_path, save_path, data_row):
                 new_r.append(t_el)
                 new_r.append(OxmlElement('w:br'))
             p_el.append(new_r)
+            log_text.insert(END, f"  ✓ Layout A: {[v for _, v in values_in_order]}\n")
 
         else:
             # ── 布局 B：右列多段落，按索引逐一写入 ───────────────
@@ -244,8 +245,11 @@ def start_processing():
             template = find_coa_template(p_code, source_p)
 
             if template:
-                output_name = f"{p_code}-{l_batch}-with ED-C6.docx"
-                final_path  = os.path.join(output_p, output_name)
+                # 从Excel取Re-assay日期，格式化为 "July 2027"
+                expiry_val    = row.get('Expiry Date/ Re-Assay Date')
+                reassay_label = moment.date(expiry_val).format('MMMM YYYY')
+                output_name   = f"{p_code}-{l_batch}-with ED-C6 ({reassay_label}).docx"
+                final_path    = os.path.join(output_p, output_name)
                 if update_docx_content(template, final_path, row):
                     try:
                         convert(final_path)
