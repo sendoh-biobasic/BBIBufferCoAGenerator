@@ -135,8 +135,10 @@ def update_docx_content(template_path, save_path, data_row):
         expiry_raw   = data_row.get('Expiry Date/ Re-Assay Date')
         mfg_raw      = data_row.get('Manufacturing Date')
 
-        reassay_str  = moment.date(expiry_raw).format('YYYY-MM-DD')  # 2027-02-28
-        mfg_str      = moment.date(mfg_raw).format('MMM D, YYYY')    # Aug 18, 2025
+        # 空日期保护：NaT 或空值时跳过格式化
+        import pandas as pd
+        reassay_str = moment.date(expiry_raw).format('YYYY-MM-DD') if pd.notna(expiry_raw) else ''
+        mfg_str      = moment.date(mfg_raw).format('MMM D, YYYY') if pd.notna(mfg_raw) else ''
 
         log_text.insert(END, f"  Lot: {lot_no} | Re-assay: {reassay_str} | Mfg: {mfg_str}\n")
 
@@ -206,7 +208,7 @@ def update_docx_content(template_path, save_path, data_row):
         for para in doc.paragraphs:
             if "Date:" in para.text and "Re-assay" not in para.text:
                 write_date_paragraph(para, f"Date: {mfg_str}")
-                log_text.insert(END, f"  ✓ Date → 'Date: {mfg_str}'\n")
+                log_text.insert(END, f"  ✓ Signature date → 'Date: {mfg_str}'\n")
 
         # ── 更新页脚 Date ─────────────────────────────────────────
         for section in doc.sections:
@@ -246,7 +248,13 @@ def start_processing():
 
             if template:
                 # 从Excel取Re-assay日期，格式化为 "July 2027"
-                expiry_val    = row.get('Expiry Date/ Re-Assay Date')
+                expiry_val = row.get('Expiry Date/ Re-Assay Date')
+                import pandas as pd
+                if pd.isna(expiry_val):
+                    log_text.insert(END, f"  ⚠️ Skipped: Expiry Date is empty for {p_code} | Lot: {l_batch}\n", 'error')
+                    log_text.see(END)
+                    root.update()
+                    continue
                 reassay_label = moment.date(expiry_val).format('MMMM YYYY')
                 output_name   = f"{p_code}-{l_batch}-with ED-C6 ({reassay_label}).docx"
                 final_path    = os.path.join(output_p, output_name)
